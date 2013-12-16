@@ -204,7 +204,67 @@ class HClust:
                 p = float(a) / len(cluster)
                 ent += -p * np.log(p)
             rst += ent
-        return rst
+        return rst / len(cluster_list)
+
+    def F_standard(self, cluster_list, label_list):
+        
+        n_f = {}
+        n_r = {}
+        r = {}
+        p = {}
+        # inverse index
+        for i in range(len(cluster_list)):
+            for j in range(len(cluster_list[i])):
+                item = cluster_list[i][j]
+                label_cur = label_list[item]
+                if not label_cur in n_f.keys():
+                    n_f[label_cur] = {}
+                if not i in n_f[label_cur].keys():
+                    n_f[label_cur][i] = 0
+                n_f[label_cur][i] += 1
+                if not i in n_r.keys():
+                    n_r[i] = {}
+                if not label_cur in n_r[i].keys():
+                    n_r[i][label_cur] = 0
+                n_r[i][label_cur] += 1
+
+        for i in set(label_list):
+            r[i] = {}
+            p[i] = {}
+            for j in range(len(cluster_list)):
+                if j in n_f[i]:
+                    v = n_f[i][j]
+                else:
+                    v = 0
+                r[i][j] = float(v) / np.sum(n_f[i].values())
+                p[i][j] = float(v) / np.sum(n_r[j].values())
+        n = sum([sum(ni.values()) for ni in n_f.values()])
+        
+        F = {}
+        for i in set(label_list):
+            F[i] = {}
+            for j in range(len(cluster_list)):
+                if (r[i][j] + p[i][j]) == 0:
+                    F[i][j] = 0
+                else:
+                    F[i][j] = 2*r[i][j]*p[i][j]/(r[i][j]+p[i][j])
+
+        F_m = {}
+        for i in set(label_list):
+            tmp = []
+            for j in range(len(cluster_list)):
+                tmp.append(F[i][j])
+
+            F_m[i] = np.max(tmp)
+
+        F_m = {}
+        for i in label_list:
+            F_m[i] = {}
+            F_m[i] = np.max([F[i][j] for j in range(len(cluster_list))])
+
+        F_score = sum([float(sum(n_f[i].values()))/n*F_m[i] for i in set(label_list)])
+
+        return F_score
 
 ### Global Variables
 # feature extractor
@@ -220,7 +280,7 @@ H = HClust()
 # 1st clustering
 def pre_clustering():
 
-    train_filename = '/home/solesschong/Workspace/HW/text-cluster/data_lite'
+    train_filename = '/home/solesschong/Workspace/HW/text-cluster/data'
 
     lines_labels = dir2lines_labels(train_filename)
     random.shuffle(lines_labels)
