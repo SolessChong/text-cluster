@@ -1,6 +1,10 @@
+import os
+import random
 import csv
 import itertools
+from collections import Counter
 import pickle
+import unicodedata
 
 from sklearn.decomposition import TruncatedSVD
 from sklearn.svm import LinearSVC
@@ -18,7 +22,7 @@ from nltk.stem.lancaster import LancasterStemmer
 
 
 ### Tunning
-DISTINCT_WORDS_CNT = 700
+DISTINCT_WORDS_CNT = 100
 FEATURE_SELECTION_CNT = 400
 USE_TENSE = False
 
@@ -35,6 +39,7 @@ class FeatureExtractor:
     vectorizer = None
     feature_names = None
     feature_matrix = None
+    features = None
 
     def train_extractor_from_lines(self, lines):
         self.vectorizer = TfidfVectorizer(tokenizer=tokenizer, max_features=DISTINCT_WORDS_CNT)
@@ -43,20 +48,27 @@ class FeatureExtractor:
         pass
 
     def train_extractor(self, full = False):
-        lines = file2lines('data/train_lite.csv')
+        lines = dir2lines_labels('data/train_lite.csv')
         self.train_extractor_from_lines(lines)
 
         pass
 
-    def get_lines_distance_matrix(self, lines):
-
-        mat = np.zeros((len(lines), len(lines)))
-        feature_df = self.lines2features(lines)
+    def get_features_distance_matrix(self, feature_df):
+        mat = np.zeros((len(feature_df), len(feature_df)))
+        
         for index1, row1 in feature_df.iterrows():
             for index2, row2 in feature_df.iterrows():
                 mat[index1, index2] = self.feature_distance(row1, row2)
 
         return mat
+
+    def get_lines_distance_matrix(self, lines):
+        
+        feature_df = self.lines2features(lines)
+
+        self.features = feature_df
+
+        return self.get_features_distance_matrix(feature_df)
 
     def lines2features(self, lines, use_tense = False):
         """
@@ -113,40 +125,36 @@ class FeatureExtractor:
         return [self.tokenizer(line) for line in lines]
 
     def load_vectorizer(self):
-        input_file = open('../models/tfidf_vectorizer.pkl', 'rb')
+        input_file = open('models/tfidf_vectorizer.pkl', 'rb')
         self.vectorizer = pickle.load(input_file)
         input_file.close()
         pass
 
     def save_vectorizer(self):
-        output_file = open('../models/tfidf_vectorizer.pkl', 'wb')
+        output_file = open('models/tfidf_vectorizer.pkl', 'wb')
         pickle.dump(self.vectorizer, output_file)
         output_file.close()
         pass
 
 class HClust:
 
-    breadscrum = {}
-
-    def clust(self, mat, h_thre = 999999, n_thre = 99999):
+    def clust(self, mat, h_thre = 999999, n_clust = 99999):
 
         m = mat.copy()
         link = []
 
         # pre process
         for i in range(mat.shape[1]):
-            mat[i,i] = 999999
+            m[i,i] = 999999
 
         # iteration
-        n_iter = np.min((mat.shape[1]-1, n_thre))
+        n_iter = np.min((mat.shape[1]-1, mat.shape[1]-n_clust))
 
         for it in range(n_iter):
             n = m.shape[1]
             c1 = m.argmin() % m.shape[1]
             c2 = int(np.floor(m.argmin() / m.shape[1]))
             link.append([mat.shape[1]+it, c1, c2, m.min()])
-            self.breadscrum[c1] = mat.shape[1]+it
-            self.breadscrum[c2] = mat.shape[1]+it
 
             if link[-1][-1] > h_thre:
                 break
@@ -168,19 +176,35 @@ class HClust:
                 m[c1,i] = m[c2,i] = 999999
         
         return link
-        
-    def link2cluster(self, link, n):
-        cluster = {}
-        for i in range(n+len(link)):
-            ind = i
-            while ind in self.breadscrum.keys():
-                ind = self.breadscrum[ind]
-            cluster[i] = ind
-        return cluster
 
+    def link2cluster_list(self, link, n):
+        N = len(link) + n
+        raw = []
+        for i in range(n):
+            raw.append([i])
 
+        for i in range(len(link)):
+            to = link[i][0]
+            from1 = link[i][1]
+            from2 = link[i][2]
+            raw.append(raw[from1]+raw[from2])
+            raw[from1] = []
+            raw[from2] = []
 
+        return [r for r in raw if r]
 
+    def entropy(self, cluster_list, label_list):
+        rst = 0
+        for cluster in cluster_list:
+            labels = [label_list[i] for i in cluster]
+            c = Counter(labels)
+            arr = zip(*c.items())[1]
+            ent = 0
+            for a in arr:
+                p = float(a) / len(cluster)
+                ent += -p * np.log(p)
+            rst += ent
+        return rst
 
 ### Global Variables
 # feature extractor
@@ -193,12 +217,89 @@ def stem(word):
 H = HClust()
 
 ### Methods
+# 1st clustering
+def pre_clustering():
+
+    train_filename = '/home/solesschong/Workspace/HW/text-cluster/data_lite'
+
+    lines_labels = dir2lines_labels(train_filename)
+    random.shuffle(lines_labels)
+    lines = zip(*lines_labels)[0]
+    labels = zip(*lines_labels)[1]
+    
+    #FE.train_extractor_from_lines(lines[1:200])
+    FE.load_vectorizer()
+    
+    N = len(lines)
+    seg = int(np.ceil(float(N)/400))
+    pre_cluster = []
+    mat = FE.get_lines_distance_matrix(lines[1:2])
+    centers = np.zeros((0, len(FE.features.columns)))
+    for i in range(seg):
+        upper = np.min(((i+1)*400, N))
+        block_lines = lines[i*400:upper]
+        mat = FE.get_lines_distance_matrix(block_lines)
+        link = H.clust(mat, n_clust=50)
+        cluster_list = H.link2cluster_list(link, upper-i*400)
+        # generate center for each pre_cluster
+        for j in range(len(cluster_list)):
+            center = FE.features.iloc[cluster_list[j]].mean()
+            centers = np.vstack((centers, np.array(center)))
+        pre_cluster.extend(cluster_list)
+
+    # Aggregate
+    features2 = DataFrame(centers, columns=FE.features.columns)
+    mat2 = FE.get_lines_distance_matrix(features2)
+    link = H.clust(mat2, n_clust=30)
+    cluster_list2 = H.link2cluster_list(link, mat2.shape[1])
+
+    cluster_list_total = []
+    for i in range(len(cluster_list2)):
+        cluster_list_total.append([])
+        for j in cluster_list2[i]:
+            cluster_list_total[i].extend(pre_cluster[j])
+
+    print H.entropy(cluster_list_total, labels)
+
+    cluster_label_result = []
+    for cluster in cluster_list_total:
+        cluster_label_result.append([labels[i] for i in cluster])
+
+    output_file = open('results/cluster_label_result_30.pkl', 'wb')        
+    pickle.dump(cluster_label_result, output_file)
+
+    # Aggregate
+    features2 = DataFrame(centers, columns=FE.features.columns)
+    mat2 = FE.get_lines_distance_matrix(features2)
+    link = H.clust(mat2, n_clust=50)
+    cluster_list2 = H.link2cluster_list(link, mat2.shape[1])
+
+    cluster_list_total = []
+    for i in range(len(cluster_list2)):
+        cluster_list_total.append([])
+        for j in cluster_list2[i]:
+            cluster_list_total[i].extend(pre_cluster[j])
+
+    print H.entropy(cluster_list_total, labels)
+
+    cluster_label_result = []
+    for cluster in cluster_list_total:
+        cluster_label_result.append([labels[i] for i in cluster])
+
+    output_file = open('results/cluster_label_result_50.pkl', 'wb')        
+    pickle.dump(cluster_label_result, output_file)
+
+    pass
+
 # main routine
 def routine_test():
 
     train_filename = 'data/train_lite.csv'
 
-    lines = file2lines(train_filename)
+    lines_labels = dir2lines_labels(train_filename)
+    lines = zip(*lines_labels)[0]
+    labels = zip(*lines_labels)[1]
+
     FE.train_extractor()
     features = FE.lines2features(lines)
     mat = FE.get_lines_distance_matrix(lines)
@@ -206,7 +307,7 @@ def routine_test():
     links = H.clust(mat, h_thre = 0.8)
 
     FE.load_vectorizer()
-    train_lines = file2lines(train_filename)
+    train_lines = dir2lines_labels(train_filename)
     train_labels = file2labels(train_filename)
 
     train_features = FE.lines2features(train_lines, use_tense = USE_TENSE)
@@ -254,44 +355,7 @@ def routine_test():
 
     return eval
 
-def routine_work():
-
-    import time
-    start_time = time.time()
-
-    print "Read data"
-
-    FE.load_vectorizer()
-    train_lines = file2lines('data/train.csv')
-    test_lines = file2lines('data/test.csv')
-    train_labels = file2labels('data/train.csv')
-    test_ids = file2ids('data/test.csv')
-
-    print "Get features"
-
-    train_features = FE.lines2features(train_lines, use_tense = USE_TENSE)
-    test_features = FE.lines2features(test_lines, use_tense = USE_TENSE)
-
-    train_features.to_csv('data/train_features.csv')
-    test_features.to_csv('data/test_features.csv')
-
-    # cross validation
-    train_data = np.matrix(train_features)
-    test_data = np.matrix(test_features)
-
-    L.train(train_data, train_labels, 'ridge')
-    prediction = L.predict(test_data)
-    
-    prediction_df = DataFrame(prediction, columns=label_name)
-    prediction_df.insert(0, 'id', test_ids)
-    prediction_df.to_csv('../submission/submit.csv', index=False, float_format='%.3f')
-
-    # Calculate time
-    print 'Execution time: ', time.time() - start_time, 'seconds.'
-
-    pass
-
-def file2lines(input_file):
+def dir2lines_labels(input_dir):
     """
     returns [
             ['a', 'b', 'c'],
@@ -299,14 +363,21 @@ def file2lines(input_file):
             []
     ]
     """
-    tweets = []
-    with open(input_file, 'r') as csvfile:
-            spamreader = csv.reader(csvfile, delimiter=',')
-            next(spamreader, None) # skip the header
-            for row in spamreader:
-                    tweets.append(row[1])
+    lines_labels = []
+    dirs = [d for d in os.listdir(input_dir) if not os.path.isfile(os.path.join(input_dir, d))]
+    for dd in dirs:
+        d = os.path.join(input_dir, dd)
+        files = [os.path.join(d, f) for f in os.listdir(d) if os.path.isfile(os.path.join(d, f))]
+        for filename in files:
+            with open(filename) as f:
+                file_lines = f.readlines()
+            file_lines = [unicode(l, errors='replace') for l in file_lines]
+            line = ""
+            for l in file_lines:
+                line += l
+            lines_labels.extend([(line, dd)])
 
-    return tweets
+    return lines_labels
 
 def file2labels(input_file):
     """
